@@ -6,6 +6,6 @@
         },
         "c:\\code\\FE\\.venv\\Scripts\\python.exe": true
     },
-    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultEnvManager": "ms-python.python:venv",
     "python-envs.defaultPackageManager": "ms-python.python:conda"
 }

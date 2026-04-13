@@ -1,175 +1,183 @@
-# Deribit Data Utilities
+# BTC Regime Change Analysis
 
-Utilities for downloading historical market data from Deribit with pandas-friendly outputs.
+This repository explores BTC market regime behavior using Deribit spot, perpetual, and funding-rate data. The codebase currently centers on two reusable utility modules:
 
-The project currently exposes two main functions from [deribit_utils.py](/abs/c:/code/FE/regime_change/deribit_utils.py):
+- `deribit_utils.py` for data collection and dataset assembly
+- `hmm_utils.py` for unsupervised Hidden Markov Model feature selection and regime diagnostics
 
-- `fetch_deribit_ohlcv(...)`
-- `fetch_deribit_funding_rates(...)`
+The notebooks build on those utilities for exploratory analysis and future modeling work.
+
+## Project Layout
+
+- `deribit_utils.py`: fetches Deribit spot OHLCV, perpetual OHLCV, and funding-rate history, then merges them into a single time-indexed dataset
+- `hmm_utils.py`: provides chronological splitting, feature cleaning, HMM fitting, HMM-derived feature generation, and automatic unsupervised HMM feature-subset search
+- `deribit_data.csv`: base merged market dataset
+- `deribit_enriched_data.csv`: engineered dataset used for regime analysis
+- `00_plot_regime_change.ipynb`: exploratory notebook for feature engineering and volatility regime visualization
+- `01_predict_regime_change.ipynb`: placeholder notebook for later predictive modeling work
+- `requirements.txt`: Python dependencies for notebooks and utilities
 
 ## Requirements
 
-Install the Python packages used by the module:
+Install dependencies with:
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-## Functions
+## Utility Modules
 
-### `fetch_deribit_ohlcv`
+### `deribit_utils.py`
 
-Fetches historical OHLCV candles from Deribit.
+This module handles data ingestion from the Deribit public API.
 
-```python
-fetch_deribit_ohlcv(
-    base_asset: str,
-    market_type: str,
-    start_dt: datetime,
-    end_dt: datetime,
-    resolution: str = "1",
-    chunk_days: int = 7,
-    sleep_seconds: float = 0.2,
-) -> pd.DataFrame
-```
+It includes helpers to:
 
-Parameters:
+- fetch spot OHLCV candles with `fetch_deribit_ohlcv(..., market_type="spot")`
+- fetch perpetual OHLCV candles with `fetch_deribit_ohlcv(..., market_type="perpetual")`
+- fetch perpetual funding-rate history with `fetch_deribit_funding_rates(...)`
+- merge spot, perpetual, and funding datasets with `merge_deribit_dataframes(...)`
+- generate and optionally save a combined dataset with `generate_merged_deribit_dataset(...)`
 
-- `base_asset`: Asset symbol such as `"BTC"` or `"ETH"`.
-- `market_type`: `"spot"` or `"perpetual"`.
-- `start_dt`: UTC start datetime.
-- `end_dt`: UTC end datetime.
-- `resolution`: Candle size. Examples: `"1"` for 1 minute, `"5"` for 5 minutes, `"60"` for 1 hour.
-- `chunk_days`: Max number of days requested per API call. The function automatically reduces this if needed.
-- `sleep_seconds`: Pause between requests to reduce rate-limit risk.
+Notable behavior:
 
-Returns:
+- large date ranges are requested in chunks to stay within Deribit candle limits
+- timestamps are normalized to UTC and used as the dataframe index
+- duplicate timestamps are removed after chunked downloads
+- merged outputs use outer joins so downstream analysis can decide how to handle missing values
+- callers can optionally drop rows with missing values in selected columns before saving
 
-- A pandas `DataFrame` indexed by `timestamp`.
-- OHLCV columns: `open`, `high`, `low`, `close`, `volume`, `cost`.
-
-Example: BTC perpetual 1-minute candles for the last 7 days
+Typical example:
 
 ```python
-from datetime import datetime, timedelta, timezone
-from deribit_utils import fetch_deribit_ohlcv
+from datetime import datetime, timezone
+from deribit_utils import generate_merged_deribit_dataset
 
-end_dt = datetime.now(timezone.utc)
-start_dt = end_dt - timedelta(days=7)
-
-btc_perp = fetch_deribit_ohlcv(
+df = generate_merged_deribit_dataset(
     base_asset="BTC",
-    market_type="perpetual",
-    start_dt=start_dt,
-    end_dt=end_dt,
-    resolution="1",
-    chunk_days=7,
-)
-
-print(btc_perp.head())
-print(btc_perp.tail())
-```
-
-Example: BTC spot candles
-
-```python
-from datetime import datetime, timedelta, timezone
-from deribit_utils import fetch_deribit_ohlcv
-
-end_dt = datetime.now(timezone.utc)
-start_dt = end_dt - timedelta(days=30)
-
-btc_spot = fetch_deribit_ohlcv(
-    base_asset="BTC",
-    market_type="spot",
-    start_dt=start_dt,
-    end_dt=end_dt,
-    resolution="60",
-    chunk_days=7,
+    start_dt=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    end_dt=datetime(2024, 3, 1, tzinfo=timezone.utc),
+    ohlcv_resolution="60",
+    funding_resolution="8h",
+    csv_path="deribit_data.csv",
 )
 ```
 
-Example: save OHLCV to disk
+### `hmm_utils.py`
+
+This module is intentionally focused on the HMM side of regime modeling. It does not build supervised targets or train downstream classifiers.
+
+It supports:
+
+- chronological train / validation / test splitting with `make_time_splits(...)`
+- candidate feature-subset generation with `generate_feature_subsets(...)`
+- feature cleaning and correlation filtering with `clean_feature_frame(...)` and `filter_high_correlation_features(...)`
+- Gaussian HMM fitting with `fit_hmm(...)`
+- creation of HMM-derived regime features with `add_hmm_features(...)`
+- unsupervised subset diagnostics with `evaluate_hmm_feature_subset(...)`
+- heuristic ranking of candidate subsets with `automatic_hmm_feature_selection(...)`
+- extraction and summarization of the best search results with `extract_best_hmm_feature_subset(...)` and `summarize_hmm_results(...)`
+
+The generated HMM feature frame includes:
+
+- `{prefix}_state`
+- `{prefix}_prob_0 ... {prefix}_prob_k`
+- `{prefix}_max_prob`
+- `{prefix}_entropy`
+
+The HMM search is ranked using unsupervised regime-quality diagnostics rather than predictive accuracy. The scoring favors:
+
+- persistent regimes via higher self-transition probabilities
+- balanced state usage
+- non-trivial regime run lengths
+- lower state uncertainty
+
+More specifically, `automatic_hmm_feature_selection(...)` optimizes over:
+
+- all feature subsets between `subset_min_size` and `subset_max_size`
+- each hidden-state count listed in `n_states_list`
+- only the chronological training split from `make_time_splits(...)`
+
+Before the search starts, the candidate list can be reduced with `filter_high_correlation_features(...)`, which removes highly correlated columns using train data only. When two features exceed the threshold, the later feature in the provided column order is dropped.
+
+For every surviving subset and state count, `evaluate_hmm_feature_subset(...)` fits a Gaussian HMM on the training split and computes:
+
+- `avg_self_transition`
+- `min_state_fraction`
+- `median_run_length`
+- `avg_entropy`
+- `train_loglik`
+
+The optimization criterion used for ranking is the heuristic `hmm_diag_score`, defined as:
 
 ```python
-btc_perp.to_csv("btc_perpetual_1m.csv")
-btc_perp.to_parquet("btc_perpetual_1m.parquet")
+0.45 * avg_self_transition
++ 0.30 * min_state_fraction
++ 0.20 * tanh(median_run_length / 10.0)
+- 0.05 * avg_entropy
 ```
 
-### `fetch_deribit_funding_rates`
+Only converged fits receive a finite score. This means the search explicitly prefers HMMs whose inferred regimes are sticky, reasonably balanced across states, and sustained for non-trivial run lengths, while lightly penalizing uncertain state assignments. `train_loglik` is reported for inspection, but it is not the ranking objective.
 
-Fetches historical funding-rate data for perpetual futures.
+Successful candidates are sorted in descending order by:
 
-```python
-fetch_deribit_funding_rates(
-    base_asset: str,
-    start_dt: datetime,
-    end_dt: datetime,
-    resolution: str = "8h",
-    chunk_days: int = 30,
-    sleep_seconds: float = 0.2,
-) -> pd.DataFrame
-```
+1. `hmm_diag_score`
+2. `avg_self_transition`
+3. `min_state_fraction`
 
-Parameters:
+Then `extract_best_hmm_feature_subset(...)` returns the feature subset and `n_states` from the first successful row in that ranked table.
 
-- `base_asset`: Asset symbol such as `"BTC"` or `"ETH"`.
-- `start_dt`: UTC start datetime.
-- `end_dt`: UTC end datetime.
-- `resolution`: Funding interval, typically `"8h"`.
-- `chunk_days`: Days requested per API call.
-- `sleep_seconds`: Pause between requests.
-
-Returns:
-
-- A pandas `DataFrame` indexed by `timestamp`.
-- Includes funding-related fields returned by Deribit such as `interest_8h`, `interest_1h`, `index_price`, and `mark_price` when present.
-
-Example: BTC funding rates for the last 90 days
+Typical example:
 
 ```python
-from datetime import datetime, timedelta, timezone
-from deribit_utils import fetch_deribit_funding_rates
+from hmm_utils import automatic_hmm_feature_selection, extract_best_hmm_feature_subset
 
-end_dt = datetime.now(timezone.utc)
-start_dt = end_dt - timedelta(days=90)
+candidate_features = [
+    "ret_spot",
+    "ret_perp",
+    "rolling_vol_24h",
+    "rolling_vol_72h",
+]
 
-btc_funding = fetch_deribit_funding_rates(
-    base_asset="BTC",
-    start_dt=start_dt,
-    end_dt=end_dt,
-    resolution="8h",
-    chunk_days=30,
+results = automatic_hmm_feature_selection(
+    df=df,
+    candidate_features=candidate_features,
+    subset_min_size=1,
+    subset_max_size=3,
+    n_states_list=[2, 3],
 )
 
-print(btc_funding.tail())
+best_features, best_n_states = extract_best_hmm_feature_subset(results)
 ```
+
+## Notebook Guide
+
+### `00_plot_regime_change.ipynb`
+
+This notebook is the exploratory entry point for the project. It focuses on market feature engineering and visual inspection of volatility regimes.
+
+It is used to:
+
+- load existing Deribit CSV data or regenerate it from the API
+- compute return and volatility-oriented features
+- visualize rolling volatility and rule-based high-volatility periods
+- inspect when BTC appears calm versus stressed
+
+The regime labels in this notebook are rule-based volatility labels, not latent HMM states.
+
+### `01_predict_regime_change.ipynb`
+
+This notebook currently exists as a scaffold for a later predictive stage. At the moment, the reusable modeling utilities in the repository are HMM-focused rather than full end-to-end supervised prediction utilities.
 
 ## Typical Workflow
 
-```python
-from datetime import datetime, timedelta, timezone
-from deribit_utils import fetch_deribit_ohlcv, fetch_deribit_funding_rates
-
-end_dt = datetime.now(timezone.utc)
-start_dt = end_dt - timedelta(days=30)
-
-ohlcv = fetch_deribit_ohlcv("BTC", "perpetual", start_dt, end_dt, resolution="1")
-funding = fetch_deribit_funding_rates("BTC", start_dt, end_dt)
-
-merged = ohlcv.join(funding, how="left")
-print(merged.tail())
-```
+1. Use `deribit_utils.py` to fetch and merge BTC spot, perpetual, and funding-rate history.
+2. Run `00_plot_regime_change.ipynb` to engineer features and inspect volatility behavior.
+3. Use `hmm_utils.py` to search for HMM feature subsets that produce stable, interpretable latent regimes.
+4. Add HMM-derived regime features back to the dataset for downstream analysis or future predictive modeling.
 
 ## Notes
 
-- Use timezone-aware UTC datetimes to avoid timestamp issues.
-- Large 1-minute downloads are automatically chunked.
-- Spot and perpetual instruments use different Deribit naming conventions internally.
-- If Deribit returns `400 Bad Request`, double-check the market type and asset symbol you passed in.
-
-## Files
-
-- [deribit_utils.py](/abs/c:/code/FE/regime_change/deribit_utils.py): main utility functions
-- [get_deribit_data.ipynb](/abs/c:/code/FE/regime_change/get_deribit_data.ipynb): notebook examples
-- [tests/README.md](/abs/c:/code/FE/regime_change/tests/README.md): test layout and guidance
+- The repository assumes time-ordered market data.
+- `hmm_utils.py` is unsupervised and focused on regime extraction quality, not classifier performance.
+- `xgboost` is present in `requirements.txt`, but no XGBoost utility module is currently included in the repository.
