@@ -85,12 +85,13 @@ The generated HMM feature frame includes:
 - `{prefix}_max_prob`
 - `{prefix}_entropy`
 
-The HMM search is ranked using unsupervised regime-quality diagnostics rather than predictive accuracy. The scoring favors:
+The HMM search is ranked using unsupervised regime-quality diagnostics rather than predictive accuracy. The model weighting inside `simple_hmm_selection_score(...)` favors:
 
 - persistent regimes via higher self-transition probabilities
 - balanced state usage
-- non-trivial regime run lengths
+- shorter, more responsive median regime run lengths
 - lower state uncertainty
+- higher normalized likelihood only as a weak tie-breaker
 
 More specifically, `automatic_hmm_feature_selection(...)` optimizes over:
 
@@ -108,20 +109,21 @@ For every surviving subset and state count, `evaluate_hmm_feature_subset(...)` f
 - `avg_entropy`
 - `train_loglik`
 
-The optimization criterion used for ranking is the heuristic `hmm_diag_score`, defined as:
+The optimization criterion used for ranking is the heuristic `selection_score`, defined as:
 
 ```python
-0.45 * avg_self_transition
-+ 0.30 * min_state_fraction
-+ 0.20 * tanh(median_run_length / 10.0)
-- 0.05 * avg_entropy
+3.0 * avg_self_transition
++ 1.5 * min_state_fraction
+- 0.25 * median_run_length
+- 2.5 * avg_entropy
++ 0.05 * loglik_per_obs_per_feature
 ```
 
-Only converged fits receive a finite score. This means the search explicitly prefers HMMs whose inferred regimes are sticky, reasonably balanced across states, and sustained for non-trivial run lengths, while lightly penalizing uncertain state assignments. `train_loglik` is reported for inspection, but it is not the ranking objective.
+Only converged fits with every state's occupancy above `min_state_fraction_threshold` receive a finite score. In practice, this means the search strongly prefers sticky, reasonably balanced, low-entropy regimes, penalizes overly long median runs, and uses normalized log-likelihood only as a light secondary term rather than the primary ranking objective. `train_loglik` is still reported for inspection, but it is not the score that drives model selection.
 
 Successful candidates are sorted in descending order by:
 
-1. `hmm_diag_score`
+1. `selection_score`
 2. `avg_self_transition`
 3. `min_state_fraction`
 

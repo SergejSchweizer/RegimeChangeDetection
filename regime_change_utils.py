@@ -274,6 +274,53 @@ def plot_volatility_regimes(
     return fig, ax
 
 
+def assign_regimes(df):
+    """
+    df: DataFrame indexed by hmm_state with multi-index columns like:
+        ('close_perp','mean'), ('abs_return_close_perp','mean'), ('volume_perp','mean')
+    """
+
+    # Flatten columns if needed
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = [col[0] for col in df.columns]
+
+    # Sanity check
+    required_cols = ["abs_return_close_perp", "volume_perp"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise ValueError(f"Missing column: {col}")
+
+    df = df.copy()
+
+    # Rank-based approach (robust for small number of states)
+    df["vol_rank"] = df["abs_return_close_perp"].rank()
+    df["volume_rank"] = df["volume_perp"].rank()
+
+    regime_labels = {}
+    regime_colors = {}
+
+    for state, row in df.iterrows():
+        vol = row["vol_rank"]
+        volu = row["volume_rank"]
+
+        if vol >= 2 and volu >= 2:
+            label = "Stress"
+            color = "lightcoral"
+        elif vol <= 1 and volu <= 1:
+            label = "Low Activity"
+            color = "lightgrey"
+        else:
+            label = "Active"
+            color = "lightgreen"
+
+        regime_labels[state] = label
+        regime_colors[state] = color
+
+    return regime_labels, regime_colors
+
+
+
 __all__ = [
     "DEFAULT_LOOKBACK_DAYS",
     "EPSILON",
@@ -291,4 +338,5 @@ __all__ = [
     "plot_returns_vs_volatility",
     "plot_volatility_regimes",
     "save_enriched_dataset",
+    "assign_regimes"
 ]

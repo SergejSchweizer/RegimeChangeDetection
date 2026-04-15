@@ -13,19 +13,22 @@ It supports:
 2. feature cleaning
 3. Gaussian HMM fitting on candidate feature subsets
 4. generation of HMM regime features
-5. unsupervised scoring of HMM feature subsets using a simple scientific criterion
+5. unsupervised scoring of HMM feature subsets using a regime-quality criterion
 6. automatic search for strong HMM input subsets
 
 Selection principle
 -------------------
-The best feature subset and number of hidden states are selected by
-maximizing the in-sample log-likelihood of the Gaussian HMM, subject to:
+The best feature subset and number of hidden states are selected using an
+unsupervised regime-quality criterion, subject to:
 
 - convergence of the estimation algorithm
 - a minimum occupancy constraint for each hidden state
 
-This avoids degenerate solutions in which one or more states are used only
-rarely and are therefore not economically interpretable.
+Among admissible models, preference is given to HMMs that produce:
+- persistent hidden states
+- low posterior uncertainty
+- economically interpretable regime durations
+- balanced state usage
 
 Important
 ---------
@@ -46,13 +49,12 @@ Use this module to find HMM feature subsets that produce:
 
 import itertools
 import warnings
-from typing import List, Tuple, Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-
-from sklearn.preprocessing import StandardScaler
 from hmmlearn.hmm import GaussianHMM
+from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
 
 
@@ -249,6 +251,31 @@ def filter_high_correlation_features(
     return [c for c in feature_cols if c not in to_drop]
 
 
+def _flatten_columns_if_needed(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Flatten MultiIndex columns into single strings.
+    """
+    if not isinstance(df.columns, pd.MultiIndex):
+        return df
+
+    out = df.copy()
+    out.columns = [
+        "_".join([str(x) for x in col if str(x) != ""]).strip("_")
+        for col in out.columns
+    ]
+    return out
+
+
+def _format_feature_list_for_tqdm(feature_cols: List[str], max_len: int = 60) -> str:
+    """
+    Format feature list into a compact string for tqdm postfix.
+    """
+    text = ",".join(feature_cols)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
 # =========================================================
 # 4) HMM FITTING
 # =========================================================
@@ -395,6 +422,39 @@ def _compute_state_sequence_stats(states: np.ndarray, n_states: int) -> Dict[str
     }
 
 
+def _count_hmm_parameters(n_states: int, n_features: int, covariance_type: str) -> int:
+    """
+    Rough parameter count for GaussianHMM, useful for normalized diagnostics.
+    """
+    if covariance_type not in {"diag", "full", "spherical", "tied"}:
+        raise ValueError(f"Unsupported covariance_type: {covariance_type}")
+
+    startprob_params = n_states - 1
+    transmat_params = n_states * (n_states - 1)
+    mean_params = n_states * n_features
+
+    if covariance_type == "diag":
+        cov_params = n_states * n_features
+    elif covariance_type == "full":
+        cov_params = n_states * (n_features * (n_features + 1) // 2)
+    elif covariance_type == "spherical":
+        cov_params = n_states
+    else:  # tied
+        cov_params = n_features * (n_features + 1) // 2
+
+    return int(startprob_params + transmat_params + mean_params + cov_params)
+
+
+def _safe_float(value: float, default: float = np.nan) -> float:
+    try:
+        out = float(value)
+        if np.isfinite(out):
+            return out
+        return default
+    except Exception:
+        return default
+
+
 def evaluate_hmm_feature_subset(
     df_train: pd.DataFrame,
     feature_cols: List[str],
@@ -451,13 +511,31 @@ def evaluate_hmm_feature_subset(
     if hasattr(hmm, "monitor_") and hasattr(hmm.monitor_, "converged"):
         converged = bool(hmm.monitor_.converged)
 
+    n_obs_used = int(len(x_df))
+    n_features = int(len(feature_cols))
+    n_params = _count_hmm_parameters(
+        n_states=n_states,
+        n_features=n_features,
+        covariance_type=covariance_type
+    )
+
+    loglik_per_obs = train_loglik / n_obs_used
+    loglik_per_obs_per_feature = train_loglik / (n_obs_used * n_features)
+    aic = 2 * n_params - 2 * train_loglik
+    bic = np.log(n_obs_used) * n_params - 2 * train_loglik
+
     return {
         "feature_cols": feature_cols,
         "n_states": n_states,
-        "n_features": len(feature_cols),
-        "n_obs_used": int(len(x_df)),
+        "n_features": n_features,
+        "n_obs_used": n_obs_used,
         "converged": converged,
         "train_loglik": train_loglik,
+        "loglik_per_obs": float(loglik_per_obs),
+        "loglik_per_obs_per_feature": float(loglik_per_obs_per_feature),
+        "aic": float(aic),
+        "bic": float(bic),
+        "n_params": int(n_params),
         "avg_self_transition": avg_self_transition,
         "avg_entropy": avg_entropy,
         "min_state_fraction": seq_stats["min_state_fraction"],
@@ -474,13 +552,20 @@ def simple_hmm_selection_score(
     min_state_fraction_threshold: float = 0.05
 ) -> float:
     """
-    Simple scientific model-selection score for HMM feature subsets.
+    Regime-quality selection score for HMM feature subsets.
 
     Selection rule
     --------------
-    Maximize the in-sample log-likelihood subject to:
+    Admissibility:
     - convergence
     - minimum state occupancy
+
+    Ranking:
+    - reward persistent regimes
+    - reward balanced state usage
+    - reward longer median run lengths
+    - penalize posterior uncertainty
+    - use normalized likelihood only as a weak tie-breaker
 
     Parameters
     ----------
@@ -497,10 +582,26 @@ def simple_hmm_selection_score(
     if not bool(row["converged"]):
         return -np.inf
 
-    if float(row["min_state_fraction"]) < min_state_fraction_threshold:
+    min_frac = _safe_float(row["min_state_fraction"], default=-np.inf)
+    if not np.isfinite(min_frac) or min_frac < min_state_fraction_threshold:
         return -np.inf
 
-    return float(row["train_loglik"])
+    avg_self_transition = _safe_float(row["avg_self_transition"], default=-np.inf)
+    avg_entropy = _safe_float(row["avg_entropy"], default=np.inf)
+    median_run_length = _safe_float(row["median_run_length"], default=-np.inf)
+    loglik_per_obs_per_feature = _safe_float(row.get("loglik_per_obs_per_feature", np.nan), default=0.0)
+
+    if not np.isfinite(avg_self_transition) or not np.isfinite(avg_entropy) or not np.isfinite(median_run_length):
+        return -np.inf
+
+    score = (
+        3.0 * avg_self_transition
+        + 1.5 * min_frac
+        - 0.25 * median_run_length
+        - 2.5 * avg_entropy
+        + 0.05 * loglik_per_obs_per_feature
+    )
+    return float(score)
 
 
 # =========================================================
@@ -524,8 +625,8 @@ def automatic_hmm_feature_selection(
     verbose: bool = True
 ) -> pd.DataFrame:
     """
-    Automatically search for strong HMM feature subsets using a simple
-    scientific selection rule.
+    Automatically search for strong HMM feature subsets using a regime-quality
+    selection rule.
 
     Procedure
     ---------
@@ -533,10 +634,12 @@ def automatic_hmm_feature_selection(
     2. optionally remove highly correlated candidates
     3. generate feature subsets
     4. fit HMM for each subset and state count
-    5. rank by:
+    5. rank by regime quality:
        - convergence
        - minimum state occupancy
-       - training log-likelihood
+       - persistence
+       - posterior certainty
+       - run-length structure
 
     Parameters
     ----------
@@ -613,6 +716,9 @@ def automatic_hmm_feature_selection(
     progress = tqdm(total=total, disable=not verbose, desc="HMM feature search", unit="fit")
 
     rows = []
+    best_score = -np.inf
+    best_desc = "None"
+
     try:
         for subset in subsets:
             for n_states in n_states_list:
@@ -635,6 +741,16 @@ def automatic_hmm_feature_selection(
                     diag["error"] = None
                     rows.append(diag)
 
+                    score = diag["selection_score"]
+                    if np.isfinite(score) and score > best_score:
+                        best_score = score
+                        best_desc = (
+                            f"{_format_feature_list_for_tqdm(diag['feature_cols'])} | "
+                            f"S={diag['avg_self_transition']:.2f} | "
+                            f"R={diag['median_run_length']:.1f} | "
+                            f"E={diag['avg_entropy']:.3f}"
+                        )
+
                 except Exception as e:
                     rows.append({
                         "feature_cols": subset,
@@ -643,6 +759,11 @@ def automatic_hmm_feature_selection(
                         "n_obs_used": np.nan,
                         "converged": False,
                         "train_loglik": np.nan,
+                        "loglik_per_obs": np.nan,
+                        "loglik_per_obs_per_feature": np.nan,
+                        "aic": np.nan,
+                        "bic": np.nan,
+                        "n_params": np.nan,
                         "avg_self_transition": np.nan,
                         "avg_entropy": np.nan,
                         "min_state_fraction": np.nan,
@@ -658,6 +779,11 @@ def automatic_hmm_feature_selection(
                     })
 
                 progress.update(1)
+                if verbose:
+                    if np.isfinite(best_score):
+                        progress.set_postfix_str(f"best={best_score:.3f} | {best_desc}")
+                    else:
+                        progress.set_postfix_str("best=None")
     finally:
         progress.close()
 
@@ -670,8 +796,16 @@ def automatic_hmm_feature_selection(
 
     if not ok_df.empty:
         ok_df = ok_df.sort_values(
-            by=["eligible", "selection_score", "train_loglik", "min_state_fraction"],
-            ascending=False
+            by=[
+                "eligible",
+                "selection_score",
+                "avg_self_transition",
+                "min_state_fraction",
+                "median_run_length",
+                "avg_entropy",
+                "loglik_per_obs_per_feature",
+            ],
+            ascending=[False, False, False, False, False, True, False]
         ).reset_index(drop=True)
 
     if top_k is not None and top_k > 0:
@@ -715,22 +849,27 @@ def extract_best_hmm_feature_subset(
 
     best_row = eligible_df.iloc[[0]].copy()
 
-    out = best_row[[
+    preferred_cols = [
         "feature_cols",
         "n_states",
         "n_features",
         "n_obs_used",
         "selection_score",
         "train_loglik",
+        "loglik_per_obs",
+        "loglik_per_obs_per_feature",
+        "aic",
+        "bic",
         "min_state_fraction",
         "avg_self_transition",
         "median_run_length",
         "avg_entropy",
         "eligible",
         "status"
-    ]].reset_index(drop=True)
+    ]
+    cols = [c for c in preferred_cols if c in best_row.columns]
 
-    return out
+    return best_row[cols].reset_index(drop=True)
 
 
 def summarize_hmm_results(
@@ -770,10 +909,14 @@ def summarize_hmm_results(
         "eligible",
         "selection_score",
         "train_loglik",
+        "loglik_per_obs",
+        "loglik_per_obs_per_feature",
         "min_state_fraction",
         "avg_self_transition",
         "median_run_length",
         "avg_entropy",
+        "aic",
+        "bic",
     ]
     available_cols = [c for c in cols if c in ok_df.columns]
 
@@ -841,3 +984,90 @@ def fit_best_hmm_from_results(
     )
 
     return hmm, scaler, best_feature_cols, best_n_states
+
+
+# =========================================================
+# 9) REGIME INTERPRETATION
+# =========================================================
+
+def assign_regimes(
+    df: pd.DataFrame,
+    vol_col: str = "abs_return_close_perp_mean",
+    activity_col: str = "volume_perp_mean"
+) -> Tuple[Dict, Dict]:
+    """
+    Assign semantic labels to HMM states using volatility and activity.
+
+    Parameters
+    ----------
+    df:
+        DataFrame indexed by HMM state. May contain MultiIndex columns.
+    vol_col:
+        Column used as volatility proxy.
+    activity_col:
+        Column used as activity proxy.
+
+    Returns
+    -------
+    tuple[dict, dict]
+        (regime_labels, regime_colors)
+    """
+    df = _flatten_columns_if_needed(df).copy()
+
+    for col in [vol_col, activity_col]:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column: {col}")
+
+    if df.empty:
+        raise ValueError("Input dataframe is empty.")
+
+    if df[vol_col].isna().any() or df[activity_col].isna().any():
+        raise ValueError("Regime interpretation columns contain NaN values.")
+
+    df["regime_score"] = (
+        df[vol_col].rank(method="first") +
+        df[activity_col].rank(method="first")
+    )
+
+    ranked_states = df["regime_score"].sort_values().index.tolist()
+
+    regime_labels: Dict = {}
+    regime_colors: Dict = {}
+
+    n = len(ranked_states)
+
+    if n == 1:
+        regime_labels[ranked_states[0]] = "Active"
+        regime_colors[ranked_states[0]] = "lightgreen"
+        return regime_labels, regime_colors
+
+    if n == 2:
+        regime_labels[ranked_states[0]] = "Low Activity"
+        regime_colors[ranked_states[0]] = "lightgrey"
+        regime_labels[ranked_states[1]] = "Stress"
+        regime_colors[ranked_states[1]] = "lightcoral"
+        return regime_labels, regime_colors
+
+    if n == 3:
+        regime_labels[ranked_states[0]] = "Low Activity"
+        regime_colors[ranked_states[0]] = "lightgrey"
+
+        regime_labels[ranked_states[1]] = "Active"
+        regime_colors[ranked_states[1]] = "lightgreen"
+
+        regime_labels[ranked_states[2]] = "Stress"
+        regime_colors[ranked_states[2]] = "lightcoral"
+        return regime_labels, regime_colors
+
+    for i, state in enumerate(ranked_states):
+        if i == 0:
+            regime_labels[state] = "Low Activity"
+            regime_colors[state] = "lightgrey"
+        elif i == n - 1:
+            regime_labels[state] = "Stress"
+            regime_colors[state] = "lightcoral"
+        else:
+            regime_labels[state] = f"Active {i}"
+            regime_colors[state] = "lightgreen"
+
+    return regime_labels, regime_colors
