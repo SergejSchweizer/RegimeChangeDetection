@@ -1,21 +1,22 @@
 # BTC Regime Change Analysis
 
-This repository explores BTC market regime behavior using Deribit spot, perpetual, and funding-rate data. The codebase currently centers on two reusable utility modules:
+This repository studies BTC market regimes using Deribit spot, perpetual, and funding-rate data. The workflow is split into two notebooks and three focused utility modules:
 
-- `deribit_utils.py` for data collection and dataset assembly
-- `hmm_utils.py` for unsupervised Hidden Markov Model feature selection and regime diagnostics
-
-The notebooks build on those utilities for exploratory analysis and future modeling work.
+- `deribit_utils.py` for Deribit data collection and dataset assembly
+- `regime_change_utils.py` for feature engineering and simple rule-based volatility regime views
+- `hmm_utils.py` for Hidden Markov Model fitting, feature selection, and latent regime diagnostics
 
 ## Project Layout
 
-- `deribit_utils.py`: fetches Deribit spot OHLCV, perpetual OHLCV, and funding-rate history, then merges them into a single time-indexed dataset
-- `hmm_utils.py`: provides chronological splitting, feature cleaning, HMM fitting, HMM-derived feature generation, and automatic unsupervised HMM feature-subset search
-- `deribit_data.csv`: base merged market dataset
-- `deribit_enriched_data.csv`: engineered dataset used for regime analysis
-- `00_plot_regime_change.ipynb`: exploratory notebook for feature engineering and volatility regime visualization
-- `01_predict_regime_change.ipynb`: placeholder notebook for later predictive modeling work
-- `requirements.txt`: Python dependencies for notebooks and utilities
+- `00_feature_engineering_and_volatility_regimes.ipynb`: loads raw Deribit data, engineers market features, and visualizes simple volatility-based regimes
+- `01_hmm_regime_analysis.ipynb`: searches for useful HMM feature subsets, fits a selected HMM, and inspects latent market regimes
+- `deribit_utils.py`: Deribit API fetching and merged dataset creation
+- `regime_change_utils.py`: feature engineering, volatility regime labeling, and exploratory plotting
+- `hmm_utils.py`: HMM training, subset search, regime interpretation, and HMM-specific plotting
+- `deribit_data.csv`: merged raw Deribit market dataset
+- `deribit_enriched_data.csv`: feature-engineered dataset used by the HMM notebook
+- `hmm_feature_selection_summary.csv`: saved summary of top HMM feature-search results
+- `requirements.txt`: Python dependencies
 
 ## Requirements
 
@@ -25,7 +26,7 @@ Install dependencies with:
 pip install -r requirements.txt
 ```
 
-## Utility Modules
+## Module Guide
 
 ### `deribit_utils.py`
 
@@ -45,7 +46,6 @@ Notable behavior:
 - timestamps are normalized to UTC and used as the dataframe index
 - duplicate timestamps are removed after chunked downloads
 - merged outputs use outer joins so downstream analysis can decide how to handle missing values
-- callers can optionally drop rows with missing values in selected columns before saving
 
 Typical example:
 
@@ -63,20 +63,58 @@ df = generate_merged_deribit_dataset(
 )
 ```
 
+### `regime_change_utils.py`
+
+This module contains the feature-engineering and rule-based regime tooling used in the exploratory notebook.
+
+It includes helpers to:
+
+- load cached Deribit data or fetch it if missing with `load_or_create_deribit_dataset(...)`
+- add core return, volume, cost, and cross-market features with `add_core_market_features(...)`
+- add rolling volatility features with `add_rolling_volatility_features(...)`
+- add spot and perpetual ATR features with `add_atr_features(...)`
+- run the full feature pipeline with `engineer_regime_change_features(...)`
+- create a simple binary high-volatility label with `add_binary_high_vol_regime(...)`
+- classify high- and low-volatility periods with `classify_volatility_regimes(...)`
+- save the enriched dataset with `save_enriched_dataset(...)`
+- plot returns vs volatility, binary regimes, and shaded volatility regimes
+
+The feature pipeline keeps downstream column names stable, so the HMM notebook can consume the enriched dataset directly.
+The engineered feature families now documented in the notebook include return, absolute-return, squared-return, volume, perp-cost, cross-market structure, rolling-volatility, and ATR features.
+
+Typical example:
+
+```python
+from regime_change_utils import (
+    engineer_regime_change_features,
+    load_or_create_deribit_dataset,
+    save_enriched_dataset,
+)
+
+raw_df = load_or_create_deribit_dataset(csv_path="deribit_data.csv", base_asset="BTC")
+df = engineer_regime_change_features(raw_df)
+save_enriched_dataset(df, csv_path="deribit_enriched_data.csv")
+```
+
 ### `hmm_utils.py`
 
-This module is intentionally focused on the HMM side of regime modeling. It does not build supervised targets or train downstream classifiers.
+This module is focused on unsupervised HMM-based regime extraction.
 
 It supports:
 
+- dataset loading and feature-block expansion with `load_dataset(...)` and `build_candidate_features(...)`
 - chronological train / validation / test splitting with `make_time_splits(...)`
-- candidate feature-subset generation with `generate_feature_subsets(...)`
 - feature cleaning and correlation filtering with `clean_feature_frame(...)` and `filter_high_correlation_features(...)`
+- candidate subset generation with `generate_feature_subsets(...)`
 - Gaussian HMM fitting with `fit_hmm(...)`
-- creation of HMM-derived regime features with `add_hmm_features(...)`
-- unsupervised subset diagnostics with `evaluate_hmm_feature_subset(...)`
-- heuristic ranking of candidate subsets with `automatic_hmm_feature_selection(...)`
-- extraction and summarization of the best search results with `extract_best_hmm_feature_subset(...)` and `summarize_hmm_results(...)`
+- HMM-derived regime feature creation with `add_hmm_features(...)`
+- automatic HMM feature search with `automatic_hmm_feature_selection(...)`
+- result summarization with `extract_best_hmm_feature_subset(...)` and `summarize_hmm_results(...)`
+- fitting the best row or any selected row with `fit_best_hmm_from_results(...)` and `fit_hmm_from_results_index(...)`
+- regime-sequence diagnostics with `resolve_hmm_columns(...)` and `compute_run_lengths(...)`
+- state profiling and semantic labeling with `summarize_state_profile(...)` and `assign_regimes(...)`
+- recent-window and full-history regime plotting with `plot_recent_regimes(...)` and `plot_full_regime_overlay(...)`
+- regime interpretation and HMM regime plotting
 
 The generated HMM feature frame includes:
 
@@ -85,101 +123,131 @@ The generated HMM feature frame includes:
 - `{prefix}_max_prob`
 - `{prefix}_entropy`
 
-The HMM search is ranked using unsupervised regime-quality diagnostics rather than predictive accuracy. The model weighting inside `simple_hmm_selection_score(...)` favors:
+The current HMM notebook builds candidate inputs from named feature blocks:
 
-- persistent regimes via higher self-transition probabilities
-- balanced state usage
-- shorter, more responsive median regime run lengths
-- lower state uncertainty
-- higher normalized likelihood only as a weak tie-breaker
+- `market_basics`
+- `activity`
+- `structure`
+- `volatility`
+- `price_dynamics`
+- `stress`
+- `funding`
 
-More specifically, `automatic_hmm_feature_selection(...)` optimizes over:
+and currently searches 3-state models over subset sizes 2 through 4.
 
-- all feature subsets between `subset_min_size` and `subset_max_size`
-- each hidden-state count listed in `n_states_list`
-- only the chronological training split from `make_time_splits(...)`
+What the HMM is doing:
 
-Before the search starts, the candidate list can be reduced with `filter_high_correlation_features(...)`, which removes highly correlated columns using train data only. When two features exceed the threshold, the later feature in the provided column order is dropped.
+- Let `x_t in R^d` be the standardized feature vector at time `t` and let `z_t in {1, ..., K}` be the latent regime.
+- The model assumes a first-order Markov chain over hidden states:
+  `P(z_t = j | z_{t-1} = i) = A_ij`
+- The initial state distribution is:
+  `P(z_1 = k) = pi_k`
+- Conditional on the hidden regime, the observed feature vector is Gaussian:
+  `x_t | z_t = k ~ N(mu_k, Sigma_k)`
+- With `covariance_type="full"` in the current notebook search, each state has its own full covariance matrix `Sigma_k`.
+- Posterior regime probabilities are:
+  `gamma_tk = P(z_t = k | x_1, ..., x_T)`
+- The exported uncertainty metric is the row-wise posterior entropy:
+  `H_t = -sum_k gamma_tk log(gamma_tk + eps)`
+  and the notebook reports `avg_entropy = (1 / T) sum_t H_t`.
 
-For every surviving subset and state count, `evaluate_hmm_feature_subset(...)` fits a Gaussian HMM on the training split and computes:
+How model diagnostics are computed:
 
-- `avg_self_transition`
-- `min_state_fraction`
-- `median_run_length`
-- `avg_entropy`
-- `train_loglik`
+- `avg_self_transition = (1 / K) sum_k A_kk`
+- If the inferred state sequence is `hat(z)_1, ..., hat(z)_T`, state usage is
+  `state_fraction_k = (1 / T) sum_t 1[hat(z)_t = k]`
+  and the code stores `min_state_fraction = min_k state_fraction_k`.
+- Run lengths are consecutive stretches of equal predicted state labels; the selection logic uses the median of those lengths.
+- Log-likelihood is `train_loglik = log p(x_1, ..., x_T | theta)`.
+- The normalized likelihood term used by the scorer is
+  `loglik_per_obs_per_feature = train_loglik / (T d)`.
+- The code also reports information criteria using the estimated HMM parameter count `p`:
+  `AIC = 2p - 2 train_loglik`
+  `BIC = log(T) p - 2 train_loglik`
 
-The optimization criterion used for ranking is the heuristic `selection_score`, defined as:
+How feature-subset selection works:
 
-```python
-3.0 * avg_self_transition
-+ 1.5 * min_state_fraction
-- 0.25 * median_run_length
-- 2.5 * avg_entropy
-+ 0.05 * loglik_per_obs_per_feature
-```
-
-Only converged fits with every state's occupancy above `min_state_fraction_threshold` receive a finite score. In practice, this means the search strongly prefers sticky, reasonably balanced, low-entropy regimes, penalizes overly long median runs, and uses normalized log-likelihood only as a light secondary term rather than the primary ranking objective. `train_loglik` is still reported for inspection, but it is not the score that drives model selection.
-
-Successful candidates are sorted in descending order by:
-
-1. `selection_score`
-2. `avg_self_transition`
-3. `min_state_fraction`
-
-Then `extract_best_hmm_feature_subset(...)` returns the feature subset and `n_states` from the first successful row in that ranked table.
+- A candidate model is immediately rejected if it did not converge or if
+  `min_state_fraction < 0.05`.
+- For eligible models, the main score is
+  `selection_score = 3.0 avg_self_transition + 1.5 min_state_fraction - 0.25 median_run_length - 2.5 avg_entropy + 0.05 loglik_per_obs_per_feature`
+- So the implementation prefers persistent regimes, non-degenerate state occupancy, low posterior uncertainty, and slightly better normalized fit.
+- The negative `median_run_length` term means the primary score penalizes extremely long uninterrupted runs.
+- After scoring, successful models are sorted by:
+  `eligible desc, selection_score desc, avg_self_transition desc, min_state_fraction desc, median_run_length desc, avg_entropy asc, loglik_per_obs_per_feature desc`
+- This means `selection_score` is the main ranking rule, while the later columns act as tie-breakers in the summary table.
 
 Typical example:
 
 ```python
-from hmm_utils import automatic_hmm_feature_selection, extract_best_hmm_feature_subset
-
-candidate_features = [
-    "ret_spot",
-    "ret_perp",
-    "rolling_vol_24h",
-    "rolling_vol_72h",
-]
+from hmm_utils import automatic_hmm_feature_selection, summarize_hmm_results
 
 results = automatic_hmm_feature_selection(
     df=df,
-    candidate_features=candidate_features,
-    subset_min_size=1,
+    candidate_features=["volume_perp", "volume_spot", "std_72h_sq_return_close_perp"],
+    subset_min_size=2,
     subset_max_size=3,
-    n_states_list=[2, 3],
+    n_states_list=[3],
 )
 
-best_features, best_n_states = extract_best_hmm_feature_subset(results)
+summary = summarize_hmm_results(results, top_n=10, stringify_features=True)
 ```
 
 ## Notebook Guide
 
-### `00_plot_regime_change.ipynb`
+### `00_feature_engineering_and_volatility_regimes.ipynb`
 
-This notebook is the exploratory entry point for the project. It focuses on market feature engineering and visual inspection of volatility regimes.
+This notebook is the feature-engineering and exploratory entry point.
 
 It is used to:
 
-- load existing Deribit CSV data or regenerate it from the API
-- compute return and volatility-oriented features
-- visualize rolling volatility and rule-based high-volatility periods
-- inspect when BTC appears calm versus stressed
+- load cached Deribit data or regenerate it from the API
+- engineer market features used later in regime modeling
+- save the enriched dataset to `deribit_enriched_data.csv`
+- visualize simple rule-based volatility regimes
 
-The regime labels in this notebook are rule-based volatility labels, not latent HMM states.
+The regimes in this notebook are rule-based volatility labels, not latent HMM states.
+The notebook now also includes:
 
-### `01_predict_regime_change.ipynb`
+- a short bridge section explaining how the engineered observed features feed the later HMM objective
+- a dedicated "New Features Created In This Notebook" section listing the main engineered feature families and key columns
+- short "Insight from this plot" notes explaining what each volatility plot reveals
 
-This notebook currently exists as a scaffold for a later predictive stage. At the moment, the reusable modeling utilities in the repository are HMM-focused rather than full end-to-end supervised prediction utilities.
+The three main plot takeaways are:
+
+- returns and short-horizon volatility cluster together during stressed periods
+- the binary `high_vol` rule makes the flagged turbulent timestamps explicit
+- the slower 72-hour signal highlights that calm and stressed periods tend to persist rather than appear as isolated spikes
+
+### `01_hmm_regime_analysis.ipynb`
+
+This notebook is the latent-regime analysis notebook.
+
+It is used to:
+
+- load the enriched dataset
+- define candidate HMM input feature blocks
+- run automatic HMM feature selection
+- fit a selected HMM configuration
+- inspect state profiles, regime distributions, transition structure, and posterior confidence
+
+The notebook now also includes:
+
+- a "What The HMM Does" section with the state-transition, emission, posterior-probability, and entropy equations
+- a "How Selection Works" section with the exact eligibility rule and ranking equation used in `hmm_utils.py`
+- markdown interpretation notes for each major output block, including the selection summary, chosen configuration, state interpretation, recent regime chart, full-history overlay, regime distribution, run-length statistics, transition matrix, and posterior confidence
 
 ## Typical Workflow
 
-1. Use `deribit_utils.py` to fetch and merge BTC spot, perpetual, and funding-rate history.
-2. Run `00_plot_regime_change.ipynb` to engineer features and inspect volatility behavior.
-3. Use `hmm_utils.py` to search for HMM feature subsets that produce stable, interpretable latent regimes.
-4. Add HMM-derived regime features back to the dataset for downstream analysis or future predictive modeling.
+1. Run `00_feature_engineering_and_volatility_regimes.ipynb` to fetch BTC Deribit data if needed and produce the enriched feature dataset.
+2. Use `deribit_enriched_data.csv` as input to `01_hmm_regime_analysis.ipynb`.
+3. Expand the notebook's named feature blocks into candidate HMM inputs, run the HMM feature search, and inspect the top-ranked configurations.
+4. Fit a selected HMM row, add `hmm_*` features back to the dataframe, and assign semantic regime labels from state profiles.
+5. Analyze latent regimes through recent and full-history overlays, run-length statistics, transition matrices, and posterior probabilities.
 
 ## Notes
 
 - The repository assumes time-ordered market data.
-- `hmm_utils.py` is unsupervised and focused on regime extraction quality, not classifier performance.
-- `xgboost` is present in `requirements.txt`, but no XGBoost utility module is currently included in the repository.
+- `hmm_utils.py` is unsupervised and optimized for regime structure quality, not classifier performance.
+- `xgboost` is listed in `requirements.txt`, but there is currently no XGBoost-based workflow in the repository.
+- The notebooks currently import directly from `regime_change_utils.py` and `hmm_utils.py`.

@@ -1,56 +1,11 @@
-"""
-hmm_utils.py
-
-Utilities for selecting input features for Hidden Markov Models (HMMs)
-in market regime modeling.
-
-Scope
------
-This module is intentionally limited to HMM-side feature selection only.
-
-It supports:
-1. chronological train / validation / test splitting
-2. feature cleaning
-3. Gaussian HMM fitting on candidate feature subsets
-4. generation of HMM regime features
-5. unsupervised scoring of HMM feature subsets using a regime-quality criterion
-6. automatic search for strong HMM input subsets
-
-Selection principle
--------------------
-The best feature subset and number of hidden states are selected using an
-unsupervised regime-quality criterion, subject to:
-
-- convergence of the estimation algorithm
-- a minimum occupancy constraint for each hidden state
-
-Among admissible models, preference is given to HMMs that produce:
-- persistent hidden states
-- low posterior uncertainty
-- economically interpretable regime durations
-- balanced state usage
-
-Important
----------
-This file does NOT contain:
-- XGBoost
-- supervised market target creation
-- downstream predictive evaluation
-
-That comes later.
-
-Typical use
------------
-Use this module to find HMM feature subsets that produce:
-- statistically well-fitted latent-state models
-- non-degenerate hidden states
-- interpretable regime structure
-"""
+from __future__ import annotations
 
 import itertools
 import warnings
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from hmmlearn.hmm import GaussianHMM
@@ -61,32 +16,12 @@ from tqdm.auto import tqdm
 warnings.filterwarnings("ignore")
 
 
-# =========================================================
-# 1) SPLITTING
-# =========================================================
-
 def make_time_splits(
     df: pd.DataFrame,
     train_frac: float = 0.6,
     val_frac: float = 0.2
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Split a dataframe into chronological train, validation, and test sets.
-
-    Parameters
-    ----------
-    df:
-        Time-ordered dataframe.
-    train_frac:
-        Fraction used for training.
-    val_frac:
-        Fraction used for validation. Remaining rows go to test.
-
-    Returns
-    -------
-    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
-        (df_train, df_val, df_test)
-    """
+    """Split a dataframe into chronological train, validation, and test sets."""
     n = len(df)
 
     if n == 0:
@@ -111,32 +46,12 @@ def make_time_splits(
     return df_train, df_val, df_test
 
 
-# =========================================================
-# 2) FEATURE SUBSETS
-# =========================================================
-
 def generate_feature_subsets(
     features: List[str],
     min_size: int,
     max_size: int
 ) -> List[List[str]]:
-    """
-    Generate all feature combinations between min_size and max_size.
-
-    Parameters
-    ----------
-    features:
-        Candidate feature names.
-    min_size:
-        Minimum subset size.
-    max_size:
-        Maximum subset size.
-
-    Returns
-    -------
-    list[list[str]]
-        All combinations in the requested size range.
-    """
+    """Generate all feature combinations between min_size and max_size."""
     if min_size < 1:
         raise ValueError("min_size must be >= 1.")
     if max_size < min_size:
@@ -150,29 +65,11 @@ def generate_feature_subsets(
     return subsets
 
 
-# =========================================================
-# 3) BASIC PREPROCESSING
-# =========================================================
-
 def clean_feature_frame(
     df: pd.DataFrame,
     feature_cols: List[str]
 ) -> pd.DataFrame:
-    """
-    Select feature columns and replace +/-inf with NaN.
-
-    Parameters
-    ----------
-    df:
-        Source dataframe.
-    feature_cols:
-        Requested columns.
-
-    Returns
-    -------
-    pd.DataFrame
-        Cleaned feature frame.
-    """
+    """Select feature columns and replace +/-inf with NaN."""
     missing = [c for c in feature_cols if c not in df.columns]
     if missing:
         raise ValueError(f"Missing columns: {missing}")
@@ -183,21 +80,7 @@ def clean_feature_frame(
 
 
 def compute_entropy(prob_matrix: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    """
-    Compute row-wise entropy for a probability matrix.
-
-    Parameters
-    ----------
-    prob_matrix:
-        2D array of probabilities.
-    eps:
-        Small numerical stability constant.
-
-    Returns
-    -------
-    np.ndarray
-        Entropy per row.
-    """
+    """Compute row-wise entropy for a probability matrix."""
     prob_matrix = np.asarray(prob_matrix)
     if prob_matrix.ndim != 2:
         raise ValueError("prob_matrix must be 2-dimensional.")
@@ -210,26 +93,7 @@ def filter_high_correlation_features(
     feature_cols: List[str],
     threshold: float = 0.95
 ) -> List[str]:
-    """
-    Remove highly correlated features using train data only.
-
-    The rule is deterministic: when two features exceed the threshold,
-    the later one in the column order is dropped.
-
-    Parameters
-    ----------
-    df_train:
-        Training dataframe.
-    feature_cols:
-        Candidate features.
-    threshold:
-        Absolute correlation threshold.
-
-    Returns
-    -------
-    list[str]
-        Filtered feature list.
-    """
+    """Remove highly correlated features using train data only."""
     if not feature_cols:
         raise ValueError("feature_cols is empty.")
     if not (0 < threshold <= 1):
@@ -252,9 +116,6 @@ def filter_high_correlation_features(
 
 
 def _flatten_columns_if_needed(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Flatten MultiIndex columns into single strings.
-    """
     if not isinstance(df.columns, pd.MultiIndex):
         return df
 
@@ -267,18 +128,232 @@ def _flatten_columns_if_needed(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _format_feature_list_for_tqdm(feature_cols: List[str], max_len: int = 60) -> str:
-    """
-    Format feature list into a compact string for tqdm postfix.
-    """
     text = ",".join(feature_cols)
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
 
 
-# =========================================================
-# 4) HMM FITTING
-# =========================================================
+def load_dataset(csv_path: str | Path = "deribit_enriched_data.csv") -> pd.DataFrame:
+    """Load a time-indexed dataset used for HMM analysis."""
+    df = pd.read_csv(csv_path)
+    timestamp = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
+    if timestamp.isna().all():
+        timestamp = pd.to_datetime(df["timestamp"])
+    return df.assign(timestamp=timestamp).set_index("timestamp").sort_index()
+
+
+def build_candidate_features(
+    df: pd.DataFrame,
+    feature_blocks: Dict[str, List[str]],
+) -> Tuple[List[str], Dict[str, List[str]]]:
+    """Build a deduplicated candidate feature list from named feature blocks."""
+    candidate_features: List[str] = []
+    missing_by_block: Dict[str, List[str]] = {}
+
+    for block_name, feature_names in feature_blocks.items():
+        existing = [feature for feature in feature_names if feature in df.columns]
+        missing = [feature for feature in feature_names if feature not in df.columns]
+
+        candidate_features.extend(existing)
+        if missing:
+            missing_by_block[block_name] = missing
+
+    candidate_features = list(dict.fromkeys(candidate_features))
+    return candidate_features, missing_by_block
+
+
+def resolve_hmm_columns(
+    df: pd.DataFrame,
+    prefix: str = "hmm"
+) -> Tuple[str, List[str]]:
+    """Resolve the HMM state column and ordered posterior-probability columns."""
+    state_col = f"{prefix}_state"
+    prob_cols = [
+        col for col in df.columns
+        if col.startswith(f"{prefix}_prob_") and col[len(f"{prefix}_prob_"):].isdigit()
+    ]
+    prob_cols = sorted(prob_cols, key=lambda col: int(col.rsplit("_", 1)[-1]))
+    return state_col, prob_cols
+
+
+def compute_run_lengths(states: pd.Series) -> pd.Series:
+    """Compute consecutive run lengths for a state sequence."""
+    states = states.dropna().astype(int)
+    if states.empty:
+        return pd.Series(dtype=float)
+
+    group_id = states.ne(states.shift()).cumsum()
+    return states.groupby(group_id).size().astype(float)
+
+
+def summarize_state_profile(
+    df: pd.DataFrame,
+    state_col: str,
+    feature_cols: List[str]
+) -> pd.DataFrame:
+    """Summarize mean market features by inferred HMM state."""
+    summary_features = [
+        "close_perp",
+        "abs_return_close_perp",
+        "volume_perp",
+        *feature_cols,
+    ]
+    summary_features = [
+        feature for feature in dict.fromkeys(summary_features)
+        if feature in df.columns
+    ]
+    return df.groupby(state_col)[summary_features].mean()
+
+
+from typing import List, Dict
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+def plot_recent_regimes(
+    df: pd.DataFrame,
+    price_col: str,
+    state_col: str,
+    prob_cols: List[str],
+    regime_labels: Dict[int, str],
+    regime_colors: Dict[int, str],
+    n_points: int = 300
+) -> None:
+    """Plot recent price action with regime shading, regime labels, and state confidence."""
+    plot_df = df[[price_col, state_col, *prob_cols]].dropna().tail(n_points).copy()
+    plot_df[state_col] = plot_df[state_col].astype(int)
+
+    x = np.arange(len(plot_df))
+    change_points = plot_df[state_col].ne(plot_df[state_col].shift()).cumsum()
+
+    active_prob = pd.Series(
+        [plot_df.iloc[i][f"hmm_prob_{state}"] for i, state in enumerate(plot_df[state_col])],
+        index=plot_df.index,
+    )
+    bar_colors = [regime_colors.get(state, "grey") for state in plot_df[state_col]]
+
+    fig, (ax1, ax2) = plt.subplots(
+        2,
+        1,
+        figsize=(16, 9),
+        gridspec_kw={"height_ratios": [3, 0.8]},
+        sharex=True,
+    )
+
+    # -------------------------
+    # Top plot: price + regimes
+    # -------------------------
+    ax1.plot(x, plot_df[price_col].values, lw=1.2, color="black")
+    ax1.set_title(f"Last {len(plot_df)} observations with HMM regimes")
+
+    y_min = plot_df[price_col].min()
+    y_max = plot_df[price_col].max()
+    y_range = y_max - y_min
+    label_y = y_max - 0.08 * y_range  # put labels near the top
+
+    for _, block in plot_df.groupby(change_points):
+        state = int(block[state_col].iloc[0])
+        start_idx = plot_df.index.get_loc(block.index[0])
+        end_idx = plot_df.index.get_loc(block.index[-1])
+
+        color = regime_colors.get(state, "grey")
+        label = regime_labels.get(state, f"State {state}")
+
+        ax1.axvspan(
+            start_idx - 0.5,
+            end_idx + 0.5,
+            alpha=0.3,
+            color=color,
+            edgecolor="black" if color == "white" else None,
+            linewidth=0.5 if color == "white" else 0,
+        )
+
+        # annotate regime label at segment midpoint
+        mid_idx = (start_idx + end_idx) / 2
+        if end_idx - start_idx >= 2:  # avoid clutter on tiny segments
+            ax1.text(
+                mid_idx,
+                label_y,
+                label,
+                ha="center",
+                va="center",
+                fontsize=9,
+                fontweight="bold",
+                bbox=dict(
+                    facecolor="white",
+                    alpha=0.7,
+                    edgecolor="none",
+                    boxstyle="round,pad=0.2"
+                ),
+                zorder=5,
+            )
+
+    handles = [
+        plt.Rectangle(
+            (0, 0),
+            1,
+            1,
+            facecolor=regime_colors[state],
+            edgecolor="black" if regime_colors[state] == "white" else None,
+        )
+        for state in sorted(regime_labels)
+    ]
+    labels = [regime_labels[state] for state in sorted(regime_labels)]
+    ax1.legend(handles, labels, title="Regimes", loc="upper left")
+
+    ax1.set_ylabel(price_col)
+    ax1.grid(True, alpha=0.3)
+
+    # -------------------------
+    # Bottom plot: probability of inferred state
+    # -------------------------
+    ax2.bar(x, active_prob.values, width=0.8, color=bar_colors, alpha=0.9)
+    ax2.set_title("Probability of the inferred state")
+    ax2.set_ylabel("Probability")
+    ax2.set_ylim(0, 1)
+    ax2.grid(True, axis="y", alpha=0.3)
+
+    step = max(1, len(plot_df) // 12)
+    ax2.set_xticks(x[::step])
+    ax2.set_xticklabels([str(idx) for idx in plot_df.index[::step]], rotation=45, ha="right")
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_full_regime_overlay(
+    df: pd.DataFrame,
+    price_col: str,
+    state_col: str,
+    regime_labels: Dict[int, str],
+    regime_colors: Dict[int, str]
+) -> None:
+    """Plot the full price history overlaid by inferred HMM regimes."""
+    plot_df = df[[price_col, state_col]].dropna().copy()
+    plot_df[state_col] = plot_df[state_col].astype(int)
+
+    ax = plot_df[price_col].plot(
+        figsize=(16, 6),
+        lw=1.0,
+        color="black",
+        alpha=0.5,
+        title=f"{price_col} segmented by regime",
+    )
+
+    for state in sorted(plot_df[state_col].unique()):
+        plot_df[price_col].where(plot_df[state_col] == state).plot(
+            ax=ax,
+            lw=2,
+            label=regime_labels.get(state, f"State {state}"),
+            color=regime_colors.get(state, None),
+        )
+
+    ax.set_ylabel(price_col)
+    ax.legend(title="Regime")
+    ax.grid(True, alpha=0.3)
+    plt.show()
+
 
 def fit_hmm(
     df_train: pd.DataFrame,
@@ -288,29 +363,7 @@ def fit_hmm(
     n_iter: int = 200,
     random_state: int = 42
 ) -> Tuple[GaussianHMM, StandardScaler]:
-    """
-    Fit a Gaussian HMM on the training split.
-
-    Parameters
-    ----------
-    df_train:
-        Training dataframe.
-    feature_cols:
-        HMM input columns.
-    n_states:
-        Number of hidden states.
-    covariance_type:
-        Covariance type for hmmlearn GaussianHMM.
-    n_iter:
-        Maximum EM iterations.
-    random_state:
-        Random seed.
-
-    Returns
-    -------
-    tuple[GaussianHMM, StandardScaler]
-        Fitted HMM and fitted scaler.
-    """
+    """Fit a Gaussian HMM on the training split."""
     if n_states < 2:
         raise ValueError("n_states must be >= 2.")
     if not feature_cols:
@@ -346,16 +399,7 @@ def add_hmm_features(
     feature_cols: List[str],
     prefix: str = "hmm"
 ) -> pd.DataFrame:
-    """
-    Generate HMM-derived regime features aligned to the dataframe index.
-
-    Output columns
-    --------------
-    - {prefix}_state
-    - {prefix}_prob_k
-    - {prefix}_max_prob
-    - {prefix}_entropy
-    """
+    """Generate HMM-derived regime features aligned to the dataframe index."""
     x_df = clean_feature_frame(df, feature_cols)
     valid_mask = x_df.notna().all(axis=1)
 
@@ -387,14 +431,7 @@ def add_hmm_features(
     return out
 
 
-# =========================================================
-# 5) HMM DIAGNOSTICS
-# =========================================================
-
 def _compute_state_sequence_stats(states: np.ndarray, n_states: int) -> Dict[str, float]:
-    """
-    Compute diagnostics for an inferred HMM state path.
-    """
     states = np.asarray(states).astype(int)
     if len(states) == 0:
         raise ValueError("Empty state sequence.")
@@ -423,9 +460,6 @@ def _compute_state_sequence_stats(states: np.ndarray, n_states: int) -> Dict[str
 
 
 def _count_hmm_parameters(n_states: int, n_features: int, covariance_type: str) -> int:
-    """
-    Rough parameter count for GaussianHMM, useful for normalized diagnostics.
-    """
     if covariance_type not in {"diag", "full", "spherical", "tied"}:
         raise ValueError(f"Unsupported covariance_type: {covariance_type}")
 
@@ -439,7 +473,7 @@ def _count_hmm_parameters(n_states: int, n_features: int, covariance_type: str) 
         cov_params = n_states * (n_features * (n_features + 1) // 2)
     elif covariance_type == "spherical":
         cov_params = n_states
-    else:  # tied
+    else:
         cov_params = n_features * (n_features + 1) // 2
 
     return int(startprob_params + transmat_params + mean_params + cov_params)
@@ -463,29 +497,7 @@ def evaluate_hmm_feature_subset(
     n_iter: int = 200,
     random_state: int = 42
 ) -> Dict:
-    """
-    Fit an HMM on one feature subset and compute regime diagnostics.
-
-    Parameters
-    ----------
-    df_train:
-        Training dataframe.
-    feature_cols:
-        Candidate HMM feature subset.
-    n_states:
-        Number of hidden states.
-    covariance_type:
-        Covariance type for GaussianHMM.
-    n_iter:
-        Maximum EM iterations.
-    random_state:
-        Random seed.
-
-    Returns
-    -------
-    dict
-        Model diagnostics for this subset.
-    """
+    """Fit an HMM on one feature subset and compute regime diagnostics."""
     hmm, scaler = fit_hmm(
         df_train=df_train,
         feature_cols=feature_cols,
@@ -551,34 +563,7 @@ def simple_hmm_selection_score(
     row: pd.Series,
     min_state_fraction_threshold: float = 0.05
 ) -> float:
-    """
-    Regime-quality selection score for HMM feature subsets.
-
-    Selection rule
-    --------------
-    Admissibility:
-    - convergence
-    - minimum state occupancy
-
-    Ranking:
-    - reward persistent regimes
-    - reward balanced state usage
-    - reward longer median run lengths
-    - penalize posterior uncertainty
-    - use normalized likelihood only as a weak tie-breaker
-
-    Parameters
-    ----------
-    row:
-        One diagnostics row.
-    min_state_fraction_threshold:
-        Minimum required share of observations in every hidden state.
-
-    Returns
-    -------
-    float
-        Selection score. Higher is better.
-    """
+    """Regime-quality selection score for HMM feature subsets."""
     if not bool(row["converged"]):
         return -np.inf
 
@@ -604,10 +589,6 @@ def simple_hmm_selection_score(
     return float(score)
 
 
-# =========================================================
-# 6) AUTOMATIC HMM FEATURE SEARCH
-# =========================================================
-
 def automatic_hmm_feature_selection(
     df: pd.DataFrame,
     candidate_features: List[str],
@@ -624,60 +605,7 @@ def automatic_hmm_feature_selection(
     random_state: int = 42,
     verbose: bool = True
 ) -> pd.DataFrame:
-    """
-    Automatically search for strong HMM feature subsets using a regime-quality
-    selection rule.
-
-    Procedure
-    ---------
-    1. keep only the train split
-    2. optionally remove highly correlated candidates
-    3. generate feature subsets
-    4. fit HMM for each subset and state count
-    5. rank by regime quality:
-       - convergence
-       - minimum state occupancy
-       - persistence
-       - posterior certainty
-       - run-length structure
-
-    Parameters
-    ----------
-    df:
-        Full time-ordered dataframe.
-    candidate_features:
-        Candidate HMM input features.
-    subset_min_size:
-        Minimum subset size.
-    subset_max_size:
-        Maximum subset size.
-    n_states_list:
-        Hidden-state counts to evaluate.
-    train_frac:
-        Train fraction.
-    val_frac:
-        Validation fraction.
-    correlation_filter_threshold:
-        Optional correlation filter threshold on train data.
-        Set to None to disable.
-    min_state_fraction_threshold:
-        Minimum required state occupancy for model admissibility.
-    top_k:
-        Keep only the top_k successful rows if not None.
-    covariance_type:
-        Covariance type for GaussianHMM.
-    n_iter:
-        Maximum EM iterations.
-    random_state:
-        Random seed.
-    verbose:
-        Whether to show a progress bar.
-
-    Returns
-    -------
-    pd.DataFrame
-        Ranked HMM subset diagnostics.
-    """
+    """Automatically search for strong HMM feature subsets."""
     if not candidate_features:
         raise ValueError("candidate_features is empty.")
     if not n_states_list:
@@ -815,27 +743,10 @@ def automatic_hmm_feature_selection(
     return out
 
 
-# =========================================================
-# 7) HELPERS TO READ RESULTS
-# =========================================================
-
 def extract_best_hmm_feature_subset(
     results_df: pd.DataFrame
 ) -> pd.DataFrame:
-    """
-    Extract the best HMM feature subset and corresponding number of states
-    from automatic_hmm_feature_selection output.
-
-    Parameters
-    ----------
-    results_df:
-        Output dataframe from automatic_hmm_feature_selection.
-
-    Returns
-    -------
-    pd.DataFrame
-        One-row dataframe containing the best feature subset and best state count.
-    """
+    """Extract the best HMM feature subset and corresponding number of states."""
     if results_df.empty:
         raise ValueError("results_df is empty.")
 
@@ -877,23 +788,7 @@ def summarize_hmm_results(
     top_n: int = 10,
     stringify_features: bool = False
 ) -> pd.DataFrame:
-    """
-    Return a compact summary view of the top HMM feature-selection results.
-
-    Parameters
-    ----------
-    results_df:
-        Output dataframe from automatic_hmm_feature_selection.
-    top_n:
-        Number of top successful rows to display.
-    stringify_features:
-        If True, convert feature_cols from list[str] to a printable string.
-
-    Returns
-    -------
-    pd.DataFrame
-        Compact summary table.
-    """
+    """Return a compact summary view of the top HMM feature-selection results."""
     if results_df.empty:
         raise ValueError("results_df is empty.")
 
@@ -930,10 +825,6 @@ def summarize_hmm_results(
     return summary_df
 
 
-# =========================================================
-# 8) FIT BEST MODEL CONVENIENCE FUNCTION
-# =========================================================
-
 def fit_best_hmm_from_results(
     df: pd.DataFrame,
     results_df: pd.DataFrame,
@@ -943,31 +834,7 @@ def fit_best_hmm_from_results(
     n_iter: int = 200,
     random_state: int = 42
 ) -> Tuple[GaussianHMM, StandardScaler, List[str], int]:
-    """
-    Fit the best HMM found by automatic_hmm_feature_selection on the train split.
-
-    Parameters
-    ----------
-    df:
-        Full time-ordered dataframe.
-    results_df:
-        Output of automatic_hmm_feature_selection.
-    train_frac:
-        Train fraction.
-    val_frac:
-        Validation fraction.
-    covariance_type:
-        Covariance type for GaussianHMM.
-    n_iter:
-        Maximum EM iterations.
-    random_state:
-        Random seed.
-
-    Returns
-    -------
-    tuple
-        (hmm, scaler, best_feature_cols, best_n_states)
-    """
+    """Fit the best HMM found by automatic_hmm_feature_selection on the train split."""
     best_df = extract_best_hmm_feature_subset(results_df)
     best_feature_cols = best_df.iloc[0]["feature_cols"]
     best_n_states = int(best_df.iloc[0]["n_states"])
@@ -986,54 +853,116 @@ def fit_best_hmm_from_results(
     return hmm, scaler, best_feature_cols, best_n_states
 
 
-# =========================================================
-# 9) REGIME INTERPRETATION
-# =========================================================
+from typing import Dict, Tuple, Optional, List
+import pandas as pd
+
+
+from typing import Dict, Tuple, Optional, List
+import pandas as pd
+
 
 def assign_regimes(
     df: pd.DataFrame,
-    vol_col: str = "abs_return_close_perp_mean",
-    activity_col: str = "volume_perp_mean"
+    vol_col: Optional[str] = None,
+    activity_col: Optional[str] = None,
+    trend_col: Optional[str] = None,
 ) -> Tuple[Dict, Dict]:
     """
-    Assign semantic labels to HMM states using volatility and activity.
+    Assign semantic labels to HMM states from a state-profile dataframe.
 
-    Parameters
-    ----------
-    df:
-        DataFrame indexed by HMM state. May contain MultiIndex columns.
-    vol_col:
-        Column used as volatility proxy.
-    activity_col:
-        Column used as activity proxy.
-
-    Returns
-    -------
-    tuple[dict, dict]
-        (regime_labels, regime_colors)
+    Works with either:
+    - summary columns like 'abs_return_close_perp_mean'
+    - raw columns like 'abs_return_close_perp'
     """
-    df = _flatten_columns_if_needed(df).copy()
 
-    for col in [vol_col, activity_col]:
-        if col not in df.columns:
-            raise ValueError(f"Missing required column: {col}")
+    df = _flatten_columns_if_needed(df).copy()
 
     if df.empty:
         raise ValueError("Input dataframe is empty.")
 
-    if df[vol_col].isna().any() or df[activity_col].isna().any():
-        raise ValueError("Regime interpretation columns contain NaN values.")
+    def _pick_column(user_col: Optional[str], candidates: List[str], role: str) -> str:
+        if user_col is not None:
+            if user_col not in df.columns:
+                raise ValueError(
+                    f"Requested {role} column '{user_col}' not found. "
+                    f"Available columns: {list(df.columns)}"
+                )
+            return user_col
 
-    df["regime_score"] = (
-        df[vol_col].rank(method="first") +
-        df[activity_col].rank(method="first")
+        for col in candidates:
+            if col in df.columns:
+                return col
+
+        raise ValueError(
+            f"Could not infer {role} column. "
+            f"Tried: {candidates}. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    vol_col = _pick_column(
+        vol_col,
+        candidates=[
+            "abs_return_close_perp_mean",
+            "abs_return_close_perp",
+            "std_24h_return_close_perp_mean",
+            "std_24h_return_close_perp",
+            "std_24h_abs_return_close_perp_mean",
+            "std_24h_abs_return_close_perp",
+            "ATR_24h_perp_mean",
+            "ATR_24h_perp",
+            "ATR_72h_perp_mean",
+            "ATR_72h_perp",
+            "abs_cost_perp_mean",
+            "abs_cost_perp",
+        ],
+        role="volatility",
     )
 
-    ranked_states = df["regime_score"].sort_values().index.tolist()
+    activity_col = _pick_column(
+        activity_col,
+        candidates=[
+            "volume_perp_mean",
+            "volume_perp",
+            "log_volume_perp_mean",
+            "log_volume_perp",
+            "ma_24h_volume_perp_mean",
+            "ma_24h_volume_perp",
+            "z_24h_volume_perp_mean",
+            "z_24h_volume_perp",
+            "cost_x_volume_perp_mean",
+            "cost_x_volume_perp",
+            "abs_cost_perp_mean",
+            "abs_cost_perp",
+        ],
+        role="activity",
+    )
+
+    if trend_col is None:
+        for c in [
+            "return_close_perp_mean",
+            "return_close_perp",
+            "diff_1h_cost_perp_mean",
+            "diff_1h_cost_perp",
+            "close_perp_mean",
+            "close_perp",
+        ]:
+            if c in df.columns:
+                trend_col = c
+                break
+
+    needed_cols = [vol_col, activity_col]
+    if df[needed_cols].isna().any().any():
+        raise ValueError(f"Regime interpretation columns contain NaN values: {needed_cols}")
+
+    work = df.copy()
+    work["_vol_rank"] = work[vol_col].rank(method="first", ascending=True)
+    work["_act_rank"] = work[activity_col].rank(method="first", ascending=True)
+    work["_regime_score"] = work["_vol_rank"] + work["_act_rank"]
+
+    ranked_states = work["_regime_score"].sort_values().index.tolist()
 
     regime_labels: Dict = {}
     regime_colors: Dict = {}
-
     n = len(ranked_states)
 
     if n == 1:
@@ -1049,14 +978,22 @@ def assign_regimes(
         return regime_labels, regime_colors
 
     if n == 3:
-        regime_labels[ranked_states[0]] = "Low Activity"
-        regime_colors[ranked_states[0]] = "lightgrey"
+        low_state = ranked_states[0]
+        mid_state = ranked_states[1]
+        high_state = ranked_states[2]
 
-        regime_labels[ranked_states[1]] = "Active"
-        regime_colors[ranked_states[1]] = "lightgreen"
+        regime_labels[low_state] = "Low Activity"
+        regime_colors[low_state] = "lightgrey"
 
-        regime_labels[ranked_states[2]] = "Stress"
-        regime_colors[ranked_states[2]] = "lightcoral"
+        regime_labels[high_state] = "Stress"
+        regime_colors[high_state] = "lightcoral"
+
+        mid_label = "Active"
+        if trend_col is not None and trend_col in work.columns:
+            mid_label = "Active / Trend"
+
+        regime_labels[mid_state] = mid_label
+        regime_colors[mid_state] = "lightgreen"
         return regime_labels, regime_colors
 
     for i, state in enumerate(ranked_states):
@@ -1071,3 +1008,76 @@ def assign_regimes(
             regime_colors[state] = "lightgreen"
 
     return regime_labels, regime_colors
+
+
+def fit_hmm_from_results_index(
+    df: pd.DataFrame,
+    results_df: pd.DataFrame,
+    selected_idx: int,
+    train_frac: float = 0.6,
+    val_frac: float = 0.2,
+    covariance_type: str = "full",
+    n_iter: int = 200,
+    random_state: int = 42
+) -> Tuple[GaussianHMM, StandardScaler, List[str], int]:
+    """Fit an HMM from a user-selected row index in results_df."""
+    if results_df.empty:
+        raise ValueError("results_df is empty.")
+
+    if selected_idx not in results_df.index:
+        raise ValueError(
+            f"selected_idx={selected_idx} not found in results_df.index. "
+            f"Available indices: {list(results_df.index)}"
+        )
+
+    row = results_df.loc[selected_idx]
+
+    if row.get("status", None) != "ok":
+        raise ValueError(
+            f"Row {selected_idx} has status={row.get('status')} and cannot be fitted."
+        )
+
+    feature_cols = row["feature_cols"]
+    n_states = int(row["n_states"])
+
+    if not isinstance(feature_cols, list) or len(feature_cols) == 0:
+        raise ValueError(f"Row {selected_idx} has invalid feature_cols: {feature_cols}")
+
+    df_train, _, _ = make_time_splits(df, train_frac=train_frac, val_frac=val_frac)
+
+    hmm, scaler = fit_hmm(
+        df_train=df_train,
+        feature_cols=feature_cols,
+        n_states=n_states,
+        covariance_type=covariance_type,
+        n_iter=n_iter,
+        random_state=random_state
+    )
+
+    return hmm, scaler, feature_cols, n_states
+
+
+__all__ = [
+    "add_hmm_features",
+    "assign_regimes",
+    "automatic_hmm_feature_selection",
+    "build_candidate_features",
+    "clean_feature_frame",
+    "compute_entropy",
+    "compute_run_lengths",
+    "evaluate_hmm_feature_subset",
+    "extract_best_hmm_feature_subset",
+    "filter_high_correlation_features",
+    "fit_best_hmm_from_results",
+    "fit_hmm",
+    "fit_hmm_from_results_index",
+    "generate_feature_subsets",
+    "load_dataset",
+    "make_time_splits",
+    "plot_full_regime_overlay",
+    "plot_recent_regimes",
+    "resolve_hmm_columns",
+    "simple_hmm_selection_score",
+    "summarize_hmm_results",
+    "summarize_state_profile",
+]
