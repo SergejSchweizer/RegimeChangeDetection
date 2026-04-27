@@ -26,18 +26,18 @@ All projects must follow modular separation.
 
 ```text
 project/
-├── ingestion/
-├── preprocessing/
-├── modeling/
-├── evaluation/
-├── api/
-├── infra/
-├── notebooks/
-├── tests/
-├── docs/
-├── README.md
-├── REPORT.md
-└── AGENTS.md
+|-- ingestion/
+|-- preprocessing/
+|-- modeling/
+|-- evaluation/
+|-- api/
+|-- infra/
+|-- notebooks/
+|-- tests/
+|-- docs/
+|-- README.md
+|-- REPORT.md
+`-- AGENTS.md
 ```
 
 Rules:
@@ -92,6 +92,25 @@ Pre-commit hooks must automatically run:
 - tests
 - lint checks
 - formatting checks
+
+---
+
+# Git Hygiene Rules
+
+The repository must never track local-only development folders or cache folders.
+
+Always ignore and keep untracked:
+
+- `.venv/`
+- `.vscode/`
+- `__pycache__/`
+- `.pytest_cache/`
+- `.mypy_cache/`
+- `.ruff_cache/`
+- `.cache/`
+- `.ipynb_checkpoints/`
+
+If any of these paths are accidentally tracked, agents must remove them from git tracking using cached removal (keep local files), then confirm `.gitignore` contains the proper exclusions.
 
 ---
 
@@ -179,7 +198,7 @@ Good:
 
 ---
 
-## 2. Abstract (150–300 words)
+## 2. Abstract (150-300 words)
 
 Must contain:
 
@@ -301,7 +320,7 @@ Minimum:
 
 Preferred:
 
-5–10 figures
+5-10 figures
 
 Examples:
 
@@ -339,15 +358,15 @@ Good:
 
 Portfolio paper:
 
-10–30 citations
+10-30 citations
 
 Academic thesis:
 
-30–100 citations
+30-100 citations
 
 Conference paper:
 
-15–50 citations
+15-50 citations
 
 Agents must cite:
 
@@ -461,3 +480,5 @@ The repository should function simultaneously as:
 - software product
 - research artifact
 - portfolio asset
+
+
